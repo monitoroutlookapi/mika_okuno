@@ -32,6 +32,7 @@ jobs:
           MS_RECOVERY_EMAIL: ${{ secrets.MS_RECOVERY_EMAIL }}
           MAIL_ADDRESS: ${{ secrets.MAIL_ADDRESS }}
           MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MY_PAGE: ${{ secrets.MY_PAGE }}
           TARGET_SUBJECT: "Personal Microsoft account security code"
           DEBUG: pw:api
         run: |
