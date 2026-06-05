@@ -5,6 +5,7 @@ const password = process.env.MS_PASSWORD;
 const recoveryEmail = process.env.MS_RECOVERY_EMAIL;
 const mailAddress = process.env.MAIL_ADDRESS;
 const mailPassword = process.env.MAIL_PASSWORD;
+const myPage = process.env.MY_PAGE;
 const targetSubject = process.env.TARGET_SUBJECT || "Personal Microsoft account security code";
 
 if (!email || !password || !recoveryEmail) {
@@ -13,6 +14,10 @@ if (!email || !password || !recoveryEmail) {
 
 if (!mailAddress || !mailPassword) {
   throw new Error("Missing MAIL_ADDRESS or MAIL_PASSWORD");
+}
+
+if (!myPage) {
+  throw new Error("Missing MY_PAGE");
 }
 
 async function snap(page, name) {
@@ -105,7 +110,6 @@ async function fetchVerificationCode() {
   throw new Error("Timed out waiting for verification code email (10 min).");
 }
 
-// Dismiss quick note and stay signed in screens in a loop until none remain
 async function dismissInterstitials(page, snapPrefix = "interstitial") {
   for (let i = 0; i < 5; i++) {
     const body = await page.locator("body").innerText().catch(() => "");
@@ -114,7 +118,6 @@ async function dismissInterstitials(page, snapPrefix = "interstitial") {
       console.log("Detected 'Quick note' screen. Clicking OK...");
       await snap(page, `${snapPrefix}-quick-note.png`);
 
-      // Try multiple selectors for the OK button
       const okBtn = page.locator(
         'button:has-text("OK"), input[value="OK"], #iNext, button#idSIButton9'
       ).first();
@@ -123,7 +126,6 @@ async function dismissInterstitials(page, snapPrefix = "interstitial") {
         await okBtn.scrollIntoViewIfNeeded();
         await okBtn.click({ force: true });
       } else {
-        // Last resort: primary button
         await clickPrimaryButton(page, "quick note OK");
       }
 
@@ -139,14 +141,76 @@ async function dismissInterstitials(page, snapPrefix = "interstitial") {
       continue;
     }
 
-    // No more interstitials
     return body;
   }
 
   return await page.locator("body").innerText().catch(() => "");
 }
 
-// Get a random word using wordnik-style approach with a fallback word list
+async function visitMyPageAndClickAll(browser, context) {
+  console.log(`Visiting MY_PAGE: ${myPage}`);
+  const page = await context.newPage();
+  await page.goto(myPage, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(3000);
+  await snap(page, "17-my-page.png");
+
+  // Gather all clickable elements: links, buttons, inputs (not text/password/hidden)
+  const clickables = await page.locator(
+    'a, button, input[type="submit"], input[type="button"], input[type="image"], [role="button"], [onclick]'
+  ).all();
+
+  console.log(`Found ${clickables.length} clickable elements on MY_PAGE`);
+
+  for (let i = 0; i < clickables.length; i++) {
+    try {
+      const el = clickables[i];
+
+      if (!await el.isVisible().catch(() => false)) continue;
+
+      const tag = await el.evaluate(e => e.tagName.toLowerCase()).catch(() => "");
+      const href = await el.evaluate(e => e.href || "").catch(() => "");
+      const text = await el.innerText().catch(() => "");
+
+      console.log(`Clicking element ${i + 1}/${clickables.length}: <${tag}> "${text.trim().slice(0, 40)}" href="${href.slice(0, 60)}"`);
+
+      if (tag === "a" && href && !href.startsWith("javascript")) {
+        // Open links in a new tab
+        const [newTab] = await Promise.all([
+          context.waitForEvent("page", { timeout: 5000 }).catch(() => null),
+          el.evaluate(e => {
+            e.setAttribute("target", "_blank");
+            e.click();
+          }),
+        ]);
+
+        if (newTab) {
+          await newTab.waitForLoadState("domcontentloaded").catch(() => {});
+          await newTab.waitForTimeout(2000);
+          await snap(newTab, `18-my-page-tab-${i}.png`);
+          await newTab.close();
+        }
+      } else {
+        // Click buttons and other elements normally
+        await el.click({ force: true, timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+
+        // If clicking navigated away, go back
+        if (page.url() !== myPage && !page.url().startsWith(myPage)) {
+          console.log("Navigated away, going back...");
+          await page.goto(myPage, { waitUntil: "domcontentloaded" });
+          await page.waitForTimeout(2000);
+        }
+      }
+    } catch (err) {
+      console.log(`Could not click element ${i + 1}: ${err.message}`);
+    }
+  }
+
+  await snap(page, "19-my-page-after-clicks.png");
+  await page.close();
+  console.log("Done clicking all elements on MY_PAGE.");
+}
+
 function getRandomWord() {
   const words = [
     "apple","brave","cloud","dream","eagle","flame","grace","honey",
@@ -171,21 +235,19 @@ function sleep(ms) {
     slowMo: 400,
   });
 
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
   page.setDefaultTimeout(90000);
 
   try {
     console.log("1. Opening Microsoft login");
-    await page.goto("https://login.live.com/", {
-      waitUntil: "domcontentloaded",
-    });
+    await page.goto("https://login.live.com/", { waitUntil: "domcontentloaded" });
     await snap(page, "01-login-page.png");
 
     console.log("2. Entering Microsoft email");
     const emailBox = page
       .locator('input#usernameEntry, input[name="loginfmt"], input[type="email"]')
       .first();
-
     await emailBox.waitFor({ state: "visible" });
     await emailBox.click();
     await emailBox.fill(email);
@@ -204,7 +266,6 @@ function sleep(ms) {
     const passwordBox = page
       .locator('input#passwordEntry, input[name="passwd"], input[type="password"]')
       .first();
-
     await passwordBox.waitFor({ state: "visible" });
     await passwordBox.click();
     await passwordBox.fill("");
@@ -224,7 +285,6 @@ function sleep(ms) {
       throw new Error("Microsoft showed CAPTCHA or block screen.");
     }
 
-    // Dismiss quick note / stay signed in — loop until all cleared
     let body = await dismissInterstitials(page, "after-password");
     await snap(page, "07-after-interstitials.png");
 
@@ -236,11 +296,8 @@ function sleep(ms) {
 
       console.log("7. Typing recovery email");
       const recoveryBox = page
-        .locator(
-          'input#iProofEmail, input[name="iProofEmail"], input[type="email"], input[type="text"]'
-        )
+        .locator('input#iProofEmail, input[name="iProofEmail"], input[type="email"], input[type="text"]')
         .first();
-
       await recoveryBox.waitFor({ state: "visible" });
       await recoveryBox.click();
       await recoveryBox.fill("");
@@ -248,44 +305,33 @@ function sleep(ms) {
       await snap(page, "09-recovery-email-filled.png");
 
       console.log("8. Clicking Send code");
-      await snap(page, "10-before-send-code.png");
-
-      const sendCodeBtn = page
-        .locator('#iSelectProofAction, input[value="Send code"]')
-        .first();
-
+      const sendCodeBtn = page.locator('#iSelectProofAction, input[value="Send code"]').first();
       await sendCodeBtn.waitFor({ state: "visible" });
       await sendCodeBtn.scrollIntoViewIfNeeded();
       await sendCodeBtn.click({ force: true });
-
       await page.waitForTimeout(7000);
-      await snap(page, "11-after-send-code-click.png");
+      await snap(page, "10-after-send-code-click.png");
 
       console.log("9. Waiting for verification code from mail.tm...");
       const verificationCode = await fetchVerificationCode();
 
-      console.log("10. Entering verification code on Microsoft login page...");
+      console.log("10. Entering verification code...");
       const codeBox = page
-        .locator(
-          'input#iOttText, input[name="iOttText"], input[placeholder*="code"], input[type="tel"], input[type="number"], input[type="text"]'
-        )
+        .locator('input#iOttText, input[name="iOttText"], input[placeholder*="code"], input[type="tel"], input[type="number"], input[type="text"]')
         .first();
-
       await codeBox.waitFor({ state: "visible" });
       await codeBox.click();
       await codeBox.fill("");
       await codeBox.type(verificationCode, { delay: 80 });
-      await snap(page, "12-code-entered.png");
+      await snap(page, "11-code-entered.png");
 
       console.log("11. Submitting verification code...");
       await clickPrimaryButton(page, "verify code");
       await page.waitForTimeout(7000);
-      await snap(page, "13-after-code-submit.png");
+      await snap(page, "12-after-code-submit.png");
 
-      // Dismiss any interstitials after code submit too
       await dismissInterstitials(page, "after-code");
       console.log("Logged in via verification code flow.");
-
     } else {
       console.log("Login complete — no verification required.");
     }
@@ -295,21 +341,29 @@ function sleep(ms) {
     console.log(`12. Navigating to Bing and searching: "${phrase}"`);
     await page.goto("https://www.bing.com", { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(3000);
-    await snap(page, "14-bing-homepage.png");
+    await snap(page, "13-bing-homepage.png");
 
     const searchBox = page
       .locator('input[name="q"], input#sb_form_q, textarea#sb_form_q')
       .first();
-
     await searchBox.waitFor({ state: "visible" });
     await searchBox.click();
     await searchBox.fill("");
     await searchBox.type(phrase, { delay: 80 });
-    await snap(page, "15-bing-search-typed.png");
-
+    await snap(page, "14-bing-search-typed.png");
     await searchBox.press("Enter");
     await page.waitForTimeout(5000);
-    await snap(page, "16-bing-search-results.png");
+    await snap(page, "15-bing-search-results.png");
+
+    // --- VISIT MY_PAGE AND CLICK EVERYTHING ---
+    console.log("13. Visiting MY_PAGE and clicking all elements...");
+    await visitMyPageAndClickAll(browser, context);
+
+    // --- BACK TO BING HOME ---
+    console.log("14. Going back to Bing home...");
+    await page.goto("https://www.bing.com", { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(3000);
+    await snap(page, "20-bing-final.png");
 
     console.log("All done!");
 
@@ -318,6 +372,7 @@ function sleep(ms) {
     await snap(page, "error-current-screen.png");
     throw err;
   } finally {
+    await context.close();
     await browser.close();
   }
 })();
